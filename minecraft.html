@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Minecraft Realistic Biomes + Bedrock Fix</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <style>
+        body { margin: 0; overflow: hidden; touch-action: none; background: #87ceeb; font-family: sans-serif; user-select: none; }
+        #ui { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 10; }
+        #inv { position: absolute; top: 10px; left: 0; width: 100%; display: flex; justify-content: center; gap: 5px; pointer-events: auto; padding: 0 10px; box-sizing: border-box; overflow-x: auto; }
+        
+        .slot { 
+            min-width: 50px; height: 50px; background: rgba(0,0,0,0.6); border: 2px solid #555; 
+            color: white; display: flex; align-items: center; justify-content: center; 
+            border-radius: 5px; position: relative; cursor: pointer;
+        }
+        .slot.active { border-color: #fff; background: rgba(255,255,255,0.3); }
+        
+        /* Иконки блоков (Текстуры) */
+        .icon { width: 30px; height: 30px; border-radius: 2px; border: 1px solid rgba(0,0,0,0.5); }
+        .icon-grass { background: #5da130; }
+        .icon-stone { background: #808080; }
+        .icon-wood { background: #6d4c41; }
+        .icon-leaves { background: #388e3c; }
+        .icon-sand { background: #e2c691; }
+        .icon-cactus { background: #2d5a27; }
+        .icon-planks { background: #a88754; }
+
+        .count { position: absolute; bottom: 2px; right: 4px; font-size: 11px; color: #ffff00; font-weight: bold; }
+        
+        .controls { position: absolute; bottom: 25px; left: 20px; display: grid; grid-template-columns: repeat(3, 60px); gap: 8px; pointer-events: auto; }
+        .btn { width: 60px; height: 60px; background: rgba(0,0,0,0.4); border: 2px solid #fff; border-radius: 12px; display: flex; align-items: center; justify-content: center; color: white; font-size: 24px; touch-action: none; }
+        
+        .actions { position: absolute; bottom: 25px; right: 20px; display: flex; flex-direction: column; gap: 10px; pointer-events: auto; }
+        .action-btn { width: 90px; height: 70px; border-radius: 15px; border: 3px solid #fff; display: flex; align-items: center; justify-content: center; color: white; font-weight: bold; font-size: 12px; text-shadow: 1px 1px 1px #000; touch-action: none; text-align: center; }
+        
+        #break-btn { background: rgba(220, 50, 50, 0.8); }
+        #build-btn { background: rgba(50, 180, 50, 0.8); }
+        #jump-btn { background: rgba(0, 0, 0, 0.5); height: 50px; }
+        
+        #cross { position: absolute; top: 50%; left: 50%; width: 20px; height: 20px; transform: translate(-50%, -50%); pointer-events: none; }
+        #cross::before, #cross::after { content: ''; position: absolute; background: white; }
+        #cross::before { top: 9px; left: 0; width: 20px; height: 2px; }
+        #cross::after { top: 0; left: 9px; width: 2px; height: 20px; }
+
+        @media screen and (orientation: portrait) {
+            .controls { bottom: 130px; left: 50%; transform: translateX(-50%); }
+            .actions { bottom: 30px; right: 50%; transform: translateX(50%); flex-direction: row; }
+        }
+    </style>
+</head>
+<body>
+
+<div id="ui">
+    <div id="cross"></div>
+    <div id="inv"></div>
+    <div class="controls">
+        <div style="grid-column:2" class="btn" id="fwd">↑</div>
+        <div style="grid-column:1" class="btn" id="lft">←</div>
+        <div style="grid-column:2" class="btn" id="bkd">↓</div>
+        <div style="grid-column:3" class="btn" id="rgt">→</div>
+    </div>
+    <div class="actions">
+        <div class="action-btn" id="break-btn">СЛОМАТЬ</div>
+        <div class="action-btn" id="build-btn">ПОСТАВИТЬ</div>
+        <div class="action-btn" id="jump-btn">ПРЫЖОК</div>
+    </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+<script>
+    let scene, camera, renderer, raycaster;
+    const worldData = new Set(); 
+    const chunkMeshes = {}; 
+    const CHUNK_SIZE = 8, RENDER_DIST = 4;
+    
+    // ИСПРАВЛЕНО: Инвентарь пуст в начале игры
+    let inventory = [];
+    let selectedIndex = -1;
+    const MAX_SLOTS = Math.floor(window.innerWidth / 60);
+
+    const types = { 
+        grass: 0x5da130, stone: 0x808080, wood: 0x6d4c41, 
+        leaves: 0x388e3c, sand: 0xe2c691, cactus: 0x2d5a27,
+        bedrock: 0x333333, planks: 0xa88754
+    };
+    const typeNames = { 
+        grass: 'ТРАВА', stone: 'КАМЕНЬ', wood: 'ДЕРЕВО', 
+        leaves: 'ЛИСТВА', sand: 'ПЕСОК', cactus: 'КАКТУС',
+        bedrock: 'БЕДРОК', planks: 'ДОСКИ'
+    };
+
+    let move = { fwd: false, bkd: false, lft: false, rgt: false };
+    let yaw = 0, pitch = 0, velY = 0;
+    const SPEED = 0.15, GRAVITY = 0.012, PLAYER_H = 1.7;
+
+    const blockGeo = new THREE.BoxGeometry(1, 1, 1);
+    const materials = {};
+    Object.keys(types).forEach(t => materials[t] = new THREE.MeshLambertMaterial({color: types[t]}));
+
+    let lookTouchId = null;
+    let lastLX = 0, lastLY = 0;
+
+    const BIOME_SCALE = 60; 
+    const NOISE_SCALE = 15; 
+    const SEED = Math.random() * 99999 + Date.now() % 1000;
+
+    init();
+    animate();
+
+    function init() {
+        scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x87ceeb);
+        scene.fog = new THREE.Fog(0x87ceeb, 15, 50);
+        camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        
+        let spawnX = 0, spawnZ = 0;
+        for(let attempt = 0; attempt < 100; attempt++) {
+            let tx = Math.floor(Math.random() * 200 - 100);
+            let tz = Math.floor(Math.random() * 200 - 100);
+            if (getBiome(tx, tz) === 'plains') {
+                spawnX = tx; spawnZ = tz;
+                break;
+            }
+        }
+        camera.position.set(spawnX, 25, spawnZ);
+        
+        renderer = new THREE.WebGLRenderer({ antialias: false });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.2));
+        document.body.appendChild(renderer.domElement);
+        
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+        const sun = new THREE.DirectionalLight(0xffffff, 0.5);
+        sun.position.set(20, 40, 20);
+        scene.add(sun);
+        
+        raycaster = new THREE.Raycaster();
+        
+        updateInvUI();
+        updateChunks();
+        setupControls();
+    }
+
+    function noise(x, z) {
+        let n = Math.sin(x * 0.12 + SEED) * Math.cos(z * 0.12 + SEED) * 2;
+        n += Math.sin(x * 0.05) * Math.cos(z * 0.05) * 4;
+        return n;
+    }
+
+    function getBiome(x, z) {
+        const t = Math.sin(x / BIOME_SCALE) + Math.cos(z / BIOME_SCALE);
+        return t > 0.8 ? 'desert' : 'plains';
+    }
+
+    function setupControls() {
+        const bind = (id, k) => {
+            const e = document.getElementById(id);
+            if(!e) return;
+            e.addEventListener('touchstart', (ev) => { ev.preventDefault(); move[k] = true; }, {passive: false});
+            e.addEventListener('touchend', (ev) => { ev.preventDefault(); move[k] = false; }, {passive: false});
+        };
+        bind('fwd', 'fwd'); bind('bkd', 'bkd'); bind('lft', 'lft'); bind('rgt', 'rgt');
+
+        document.getElementById('jump-btn').addEventListener('touchstart', (e) => {
+            e.preventDefault(); if(Math.abs(velY) < 0.01) velY = 0.23;
+        }, {passive: false});
+
+        document.getElementById('break-btn').addEventListener('touchstart', (e) => {
+            e.preventDefault(); interact('break');
+        }, {passive: false});
+
+        document.getElementById('build-btn').addEventListener('touchstart', (e) => {
+            e.preventDefault(); interact('build');
+        }, {passive: false});
+
+        window.addEventListener('touchstart', (e) => {
+            for (let touch of e.changedTouches) {
+                if (!touch.target.closest('.btn, .action-btn, .slot')) {
+                    if (lookTouchId === null) {
+                        lookTouchId = touch.identifier;
+                        lastLX = touch.clientX;
+                        lastLY = touch.clientY;
+                    }
+                }
+            }
+        }, {passive: false});
+
+        window.addEventListener('touchmove', (e) => {
+            for (let touch of e.changedTouches) {
+                if (touch.identifier === lookTouchId) {
+                    const dx = touch.clientX - lastLX;
+                    const dy = touch.clientY - lastLY;
+                    yaw -= dx * 0.005;
+                    pitch -= dy * 0.005;
+                    pitch = Math.max(-1.5, Math.min(1.5, pitch));
+                    lastLX = touch.clientX;
+                    lastLY = touch.clientY;
+                }
+            }
+        }, {passive: false});
+
+        window.addEventListener('touchend', (e) => {
+            for (let touch of e.changedTouches) {
+                if (touch.identifier === lookTouchId) lookTouchId = null;
+            }
+        });
+    }
+
+    function addToInventory(type) {
+        if(type === 'bedrock') return;
+        let existing = inventory.find(item => item.type === type);
+        if (existing) { existing.count++; } 
+        else if (inventory.length < MAX_SLOTS) { 
+            inventory.push({ type, count: 1 }); 
+            if (selectedIndex === -1) selectedIndex = 0;
+        }
+        updateInvUI();
+    }
+
+    function useFromInventory() {
+        if (selectedIndex === -1 || !inventory[selectedIndex]) return null;
+        let type = inventory[selectedIndex].type;
+        inventory[selectedIndex].count--;
+        if (inventory[selectedIndex].count <= 0) {
+            inventory.splice(selectedIndex, 1);
+            selectedIndex = inventory.length > 0 ? 0 : -1;
+        }
+        updateInvUI();
+        return type;
+    }
+
+    function updateInvUI() {
+        const container = document.getElementById('inv');
+        container.innerHTML = '';
+        for (let i = 0; i < MAX_SLOTS; i++) {
+            const slot = document.createElement('div');
+            slot.className = 'slot' + (i === selectedIndex ? ' active' : '');
+            if (inventory[i]) {
+                slot.innerHTML = `<div class="icon icon-${inventory[i].type}"></div><div class="count">${inventory[i].count}</div>`;
+                slot.onclick = (e) => { e.stopPropagation(); selectedIndex = i; updateInvUI(); };
+            }
+            container.appendChild(slot);
+        }
+    }
+
+    function spawnTree(x, y, z) {
+        let th = 4 + Math.floor(Math.random()*2);
+        for(let i=0; i<th; i++) addBlockData(x, y+i, z, 'wood');
+        for(let ox=-2; ox<=2; ox++) {
+            for(let oz=-2; oz<=2; oz++) {
+                for(let oy=th-2; oy<=th+1; oy++) {
+                    if(Math.sqrt(ox*ox + (oy-th)**2 + oz*oz) < 2.2) {
+                        if(!(ox===0 && oz===0 && oy < th)) addBlockData(x+ox, y+oy, z+oz, 'leaves');
+                    }
+                }
+            }
+        }
+    }
+
+    function spawnCactus(x, y, z) {
+        let ch = 2 + Math.floor(Math.random()*2);
+        for(let i=0; i<ch; i++) {
+            addBlockData(x, y+i, z, 'cactus');
+        }
+    }
+
+    function addBlockData(x, y, z, type) {
+        x = Math.round(x); y = Math.round(y); z = Math.round(z);
+        const key = `${x},${y},${z}`;
+        if (worldData.has(key)) return;
+        worldData.add(key);
+        const cKey = `${Math.floor(x/8)},${Math.floor(z/8)}`;
+        if (!chunkMeshes[cKey]) chunkMeshes[cKey] = { blocks: [], mesh: null, generated: false };
+        chunkMeshes[cKey].blocks.push({x, y, z, type});
+    }
+
+    function generateChunk(cx, cz) {
+        const cKey = `${cx},${cz}`;
+        if (chunkMeshes[cKey] && chunkMeshes[cKey].generated) return;
+        for (let x = 0; x < 8; x++) {
+            for (let z = 0; z < 8; z++) {
+                const wx = cx * 8 + x, wz = cz * 8 + z;
+                const biome = getBiome(wx, wz);
+                const h = Math.floor(noise(wx, wz));
+                
+                if (biome === 'desert') {
+                    addBlockData(wx, h, wz, 'sand');
+                    if(Math.random() > 0.98) spawnCactus(wx, h+1, wz);
+                } else {
+                    addBlockData(wx, h, wz, 'grass');
+                    if(Math.random() > 0.985) spawnTree(wx, h+1, wz);
+                }
+
+                for (let i = 1; i <= 10; i++) {
+                    addBlockData(wx, h - i, wz, 'stone');
+                }
+                addBlockData(wx, h - 11, wz, 'bedrock');
+            }
+        }
+        if (!chunkMeshes[cKey]) chunkMeshes[cKey] = { blocks: [], mesh: null, generated: true };
+        else chunkMeshes[cKey].generated = true;
+    }
+
+    function updateChunks() {
+        const pCX = Math.floor(camera.position.x/8), pCZ = Math.floor(camera.position.z/8);
+        for (let x=pCX-RENDER_DIST; x<=pCX+RENDER_DIST; x++) {
+            for (let z=pCZ-RENDER_DIST; z<=pCZ+RENDER_DIST; z++) {
+                generateChunk(x, z);
+                if (chunkMeshes[`${x},${z}`] && !chunkMeshes[`${x},${z}`].mesh) renderChunk(`${x},${z}`);
+            }
+        }
+    }
+
+    function renderChunk(cKey) {
+        const chunk = chunkMeshes[cKey];
+        if (!chunk || chunk.blocks.length === 0) return;
+        const group = new THREE.Group();
+        const dummy = new THREE.Object3D();
+        const batches = {};
+        chunk.blocks.forEach(b => { if(!batches[b.type]) batches[b.type]=[]; batches[b.type].push(b); });
+        Object.keys(batches).forEach(t => {
+            const b = batches[t];
+            const im = new THREE.InstancedMesh(blockGeo, materials[t], b.length);
+            b.forEach((blk, i) => { dummy.position.set(blk.x, blk.y, blk.z); dummy.updateMatrix(); im.setMatrixAt(i, dummy.matrix); });
+            group.add(im);
+        });
+        chunk.mesh = group;
+        scene.add(group);
+    }
+
+    function isSolid(x, y, z) { return worldData.has(`${Math.round(x)},${Math.round(y)},${Math.round(z)}`); }
+
+    function updatePhysics() {
+        velY -= GRAVITY;
+        let nextY = camera.position.y + velY;
+        if (isSolid(camera.position.x, nextY - PLAYER_H, camera.position.z)) {
+            if (velY < 0) { 
+                velY = 0; 
+                camera.position.y = Math.round(nextY - PLAYER_H) + 0.5 + PLAYER_H; 
+            }
+        } else { 
+            camera.position.y = nextY; 
+        }
+
+        const cos = Math.cos(yaw), sin = Math.sin(yaw);
+        let dx = 0, dz = 0;
+        if(move.fwd){dx-=sin; dz-=cos;} if(move.bkd){dx+=sin; dz+=cos;}
+        if(move.lft){dx-=cos; dz+=sin;} if(move.rgt){dx+=cos; dz-=sin;}
+        
+        if(dx!==0||dz!==0){
+            const l=Math.sqrt(dx*dx+dz*dz); 
+            dx=(dx/l)*SPEED; 
+            dz=(dz/l)*SPEED;
+        }
+
+        const radius = 0.3;
+        if (dx !== 0) {
+            const checkX = camera.position.x + dx + (dx > 0 ? radius : -radius);
+            if(!isSolid(checkX, camera.position.y - 1.5, camera.position.z)) {
+                camera.position.x += dx;
+            }
+        }
+        if (dz !== 0) {
+            const checkZ = camera.position.z + dz + (dz > 0 ? radius : -radius);
+            if(!isSolid(camera.position.x, camera.position.y - 1.5, checkZ)) {
+                camera.position.z += dz;
+            }
+        }
+    }
+
+    function interact(mode) {
+        raycaster.setFromCamera(new THREE.Vector2(0,0), camera);
+        const meshes = [];
+        Object.values(chunkMeshes).forEach(c => { if(c.mesh) meshes.push(...c.mesh.children); });
+        const hits = raycaster.intersectObjects(meshes);
+        if(hits.length > 0 && hits[0].distance < 7) {
+            const h = hits[0], pos = mode === 'break' ? 
+                h.point.clone().sub(h.face.normal.clone().multiplyScalar(0.5)).round() :
+                h.point.clone().add(h.face.normal.clone().multiplyScalar(0.5)).round();
+            const cKey = `${Math.floor(pos.x/8)},${Math.floor(pos.z/8)}`;
+            
+            if(mode === 'break') {
+                const key = `${pos.x},${pos.y},${pos.z}`;
+                if(worldData.has(key)) {
+                    const blockIndex = chunkMeshes[cKey].blocks.findIndex(b => `${b.x},${b.y},${b.z}` === key);
+                    const b = chunkMeshes[cKey].blocks[blockIndex];
+                    if(b && b.type === 'bedrock') return;
+                    if(b) addToInventory(b.type);
+                    worldData.delete(key);
+                    chunkMeshes[cKey].blocks.splice(blockIndex, 1);
+                    scene.remove(chunkMeshes[cKey].mesh); chunkMeshes[cKey].mesh = null;
+                }
+            } else {
+                let type = useFromInventory();
+                if(type && pos.distanceTo(camera.position) > 1.2) {
+                    addBlockData(pos.x, pos.y, pos.z, type);
+                    if(chunkMeshes[cKey].mesh) { scene.remove(chunkMeshes[cKey].mesh); chunkMeshes[cKey].mesh = null; }
+                }
+            }
+        }
+    }
+
+    function animate() {
+        requestAnimationFrame(animate);
+        camera.rotation.set(pitch, yaw, 0, 'YXZ');
+        updatePhysics();
+        updateChunks();
+        renderer.render(scene, camera);
+    }
+</script>
+</body>
+</html>
